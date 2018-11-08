@@ -3,7 +3,21 @@ include "memory.inc"									; Constants & macros for SMM/LMM and Compiler
 include "PSoCAPI.inc"									; PSoC API definitions for all User Modules
 
 export _main
-export ADCResult
+export ADCCount											; export the count in case they are used elsewhere
+export ADCResult										; export the results in case they are used elsewhere
+export ADCThresh										; export the threshold results in case they are used elsewhere
+export ThresholdTotal									; threshold total
+export dOpr2											; used for division
+export dOpr1											; used for division
+export dRes												; used for division
+
+	ADCCount:		blk 4								; ADC count storage
+	ADCResult:		blk 4								; ADC result storage
+	ADCThresh:		blk 4								; ADC threshold storage
+	ThresholdTotal 	blk 2
+	dOpr2:			blk	4
+	dOpr1:			blk	4
+	dRes:			blk 4
 
 _main:
 
@@ -15,16 +29,15 @@ Declare_Interupts:
 	M8C_EnableGInt										; enables the Global Interrupt - source: http://www.cypress.com/file/46516/download
 
 Declare_Variables:
-	ADCResult:	BLK 4						;ADC result storage
 
 Declare_Analog:
-	mov A, [bits]										; sets up the variable to a specific set of bits (7 to 13 bits)
+	mov A, [bits]										; sets up the variable to a specific set of bits (7 to 13 bits) - source: http://www.cypress.com/file/121636/download
 	lcall DUALADC_1_SetResolution						; call the Set Resolution function - remove the 1 in the middle if using DUALADC.asm
 	
-	mov A, DUALADC_1_HIGHPOWER										; sets up the variable for a specific power level (0 to 3) - in this case, highpower is 3
+	mov A, DUALADC_1_HIGHPOWER							; sets up the variable for a specific power level (0 to 3) - in this case, highpower is 3 - source: http://www.cypress.com/file/121636/download
 	lcall DUALADC_1_Start								; call the start mode for ADC - might not be needed
 	
-	mov A, 00h											; sets variable to 0 for continuous sampling mode
+	mov A, 00h											; sets variable to 0 for sampling mode - source: http://www.cypress.com/file/121636/download
 	lcall DUALADC_1_GetSamples							; call the ADC sampling mode - might not be needed
 	
 loop:
@@ -34,36 +47,26 @@ loop:
 
 ;=====THRESHOLD MODE=====
 ; might have multiple 'states' in this mode
-thresh_mode:
+sound_mode:
 	mov A, 00h											; sets the row to position 0
 	mov X, 00h											; sets the column to position 0
 	lcall LCD_1_Position								; officially position the LCD to A and X variables
-	mov A <SOUND_MODE									; sets up the row for our literal
-	mov X >SOUND_MODE									; sets up the column for our literal
+	mov A <THRESH_MODE									; sets up the row for our literal
+	mov X >THRESH_MODE									; sets up the column for our literal
 	lcall LCD_1_PrCString								; prints the literal on our LCD
-		
-
+	
 prepare_threshold:
-	mov [iResult_Total+3], 00h							; reset total values for use by the ADC
-	mov [iResult_Total+2], 00h							; total holds the addition of each measurement
-	mov [iResult_Total+1], 00h
-	mov [iResult_Total+0], 00h
-
-sound_start:
-	mov [_timer_s], 00h									; clears the variable
-	mov [_timer_m], 00h									; clears the variable
-	mov [_timer_h], 00h									; clears the variable
+	mov [ADCResult+3], 00h								; clear total values for use by the ADC
+	mov [ADCResult+2], 00h
+	mov [ADCResult+1], 00h
+	mov [ADCResult+0], 00h	
 	
-	mov A, 00h											; sets the row to position 0
-	mov X, 00h											; sets the column to position 0
-	lcall LCD_1_Position								; officially position the LCD to A and X variables
-	mov A <DEFAULT_TIME									; sets up the row for our literal
-	mov X >DEFAULT_TIME									; sets up the column for our literal
-	lcall LCD_1_PrCString								; prints the literal on our LCD
+	mov [ADCCount+3], 00h								; clear the tallies for number of measurements
+	mov [ADCCount+2], 00h
+	mov [ADCCount+1], 00h
+	mov [ADCCount+0], 00h
 	
-	; might have to do some more variable clearing for ADC - not sure how to do it
-	
-; polling for ADC Signal (microphone - start mode)
+; polling for ADC Signal (threshold)
 ADC_Check_Start:
 	lcall DUALADC_1_fIsDataAvailable					; check if there is ADC data is available - replace with DUALADC_fIsDataAvailable or ADC_fIsDataAvailable
 	jz ADC_Check_Start									; polling loop - ends with data being ready
@@ -74,21 +77,97 @@ ADC_Check_Start:
 	
 	lcall DUALADC_1_ClearFlag							; clearing ADC ready flag - remove the 1 in the middle if using DUALADC.asm
 
-	and F, FBh									; clear the CF
+	and F, FBh											; clearing the CF
 	
-sound_end:
-	mov A, 00h
+	mov [ADCResult+3], A								; get ADC data (X=MSB A=LSB) - store LSB - source: http://www.cypress.com/file/121636/download
+	mov A, X
+	adc [ADCResult+2], A								; store MSB into the next LSB
+	adc [ADCResult+1], 00h								; continue with the adc
+	adc [ADCResult+0], 00h
+	
+	inc [ADCCount+3]									; increment the count for the sample
+	adc [ADCCount+0], 00h								; continue with the adc
+	adc [ADCCount+0], 00h
+	adc [ADCCount+0], 00h
+	
+	mov [dOpr1+0], [ADCResult+0]						; copy the total to the dividend for divide routine
+	mov [dOpr1+1], [ADCResult+1]
+	mov [dOpr1+2], [ADCResult+2]
+	mov [dOpr1+3], [ADCResult+3]
+	
+	mov [dOpr2+0], [ADCCount+0]							; copy the total to the divisor for divide routine
+	mov [dOpr2+1], [ADCCount+1]
+	mov [dOpr2+2], [ADCCount+2]
+	mov [dOpr2+3], [ADCCount+3]
+	
+	lcall unsigned_32_divide							; goto the unsigned division routine
+	
+	mov [ADCThresh+3], [dRes+3]							; copy the result
+	mov [ADCThresh+2], [dRes+2]	
+	mov [ADCThresh+1], [dRes+1]
+	mov [ADCThresh+0], [dRes+0]
+	
+	mov [ThresholdTotal+1], [ADCThresh+3]				; copy over LSB to threshold LSB
+	mov [ThresholdTotal+0], [ADCThresh+2]				; copy over MSB to threshold MSB
+	
+	; this will make the threashold be doubled for the whistle trigger
+	asl [ThresholdTotal+1]								; multiple threshold by two
+	asl [ThresholdTotal+0]								
+	
+	; display the results
+	mov A, 00h 
 	mov X, 00h
-	lcall LCD_1_Position
-	mov A <DEFAULT_LCD									; sets up the row for our literal
-	mov X >DEFAULT_LCD									; sets up the column for our literal
-	lcall LCD_1_PrCString								; prints the literal on our LCD
-
-	ljmp loop											; back to our loop
+	lcall LCD_Position
+	mov A, >THRESH_TOTAL
+	mov X, <THRESH_TOTAL
+	lcall LCD_PrCString
+	
+	mov A, 00h
+	mov X, 0Ah
+	lcall LCD_Position
+	mov A, [ADCResult+3]
+	lcall LCD_PrHexByte
+	
+	mov A, 00h
+	mov X, 0Dh
+	lcall LCD_Position
+	mov A, [ThresholdTotal+1]
+	lcall LCD_PrHexByte
+	
+thresh_end:
+	ljmp loop
 	
 ;=====END MODE=====
 .terminate:
 	jmp .terminate
+
+;=====32 BIT DIVISION=====
+; source: http://www.cypress.com/file/133371/download
+unsigned_32_divide:
+	push X												; preserve the X register if necessary
+	mov A, >dRes										; push the address of result variable
+	push A
+	mov A, <dRes
+	push A
+	mov A, [dOpr2+0]									; push the second parameter dOpr2
+	push A
+	mov A, [dOpr2+1]
+	push A
+	mov A, [dOpr2+2]
+	push A
+	mov A, [dOpr2+3]
+	push A
+	mov A, [dOpr1+0]									; push the first parameter dOpr1
+	push A
+	mov A, [dOpr1+1]
+	push A
+	mov A, [dOpr1+2]
+	push A
+	mov A, [dOpr1+3]
+	push A
+	lcall divu_32x32_32									; do the application
+	add SP, 246											; pop the stack
+	pop X												; restore the X register if necessary
 	
 ;=====LITERAL DATA=====
 .LITERAL												; literal for sound mode descriptor for LCD - Source: http://www.cypress.com/file/72341/download
@@ -98,7 +177,13 @@ db 00h
 .ENDLITERAL
 
 .LITERAL												; literal for sound mode descriptor for LCD - Source: http://www.cypress.com/file/72341/download
-THRESHOLD_MODE:
-ds "THRESH MODE"											; might need to add more spaces for LCD row after "MODE"
+THRESH_MODE:
+ds "THRESH MODE"										; might need to add more spaces for LCD row after "MODE"
+db 00h
+.ENDLITERAL
+
+.LITERAL												; literal for sound mode descriptor for LCD - Source: http://www.cypress.com/file/72341/download
+THRESH_TOTAL:
+ds "TOTAL:"												; might need to add more spaces for LCD row after "TOTAL:"
 db 00h
 .ENDLITERAL
